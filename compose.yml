@@ -1,0 +1,207 @@
+version: '3.7'
+services:
+  nginx:
+    build:
+      context: ./nginx 
+      target: dev
+    container_name: nginx
+    restart: always
+    environment:
+      TZ: ${TZ}
+    volumes: 
+      - ./nginx/conf:/etc/nginx/conf.d
+      - ./nginx/log:/var/log/nginx
+    networks:
+      - home
+    ports:
+      - 80:80
+      - 443:443
+
+  web:
+    image: yeasy/simple-web
+    container_name: web
+    restart: always
+    networks:
+      - home
+    depends_on:
+      - nginx
+  
+  n8n:
+    image: n8nio/n8n:1.70.0
+    restart: always
+    container_name: n8n
+    ports:
+      - "5678:5678"
+    env_file:
+      .env
+    environment:
+      - N8N_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_SECURE_COOKIE=false
+      - N8N_DEFAULT_LOCALE=ru
+      - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_EDITOR_BASE_URL=${SUBDOMAIN}.${DOMAIN_NAME}
+      - NODE_ENV=production
+      - WEBHOOK_URL=https://${SUBDOMAIN}.${DOMAIN_NAME}
+      - GENERIC_TIMEZONE=${TZ}
+      - DB_TYPE=${N8N_DB_TYPE}
+      - DB_POSTGRESDB_DATABASE=${N8N_DB_POSTGRESDB_DATABASE}
+      - DB_POSTGRESDB_HOST=${N8N_DB_POSTGRESDB_HOST}
+      - DB_POSTGRESDB_PORT=${N8N_DB_POSTGRESDB_PORT}
+      - DB_POSTGRESDB_USER=${N8N_DB_POSTGRESDB_USER}
+      - DB_POSTGRESDB_PASSWORD=${N8N_DB_POSTGRESDB_PASSWORD}
+      - DB_POSTGRESDB_SCHEMA=${N8N_DB_POSTGRESDB_SCHEMA}
+    volumes:
+      - ./n8n:/home/node/.n8n
+      - ./n8n/files:/files
+    networks:
+      - home
+    depends_on:
+      - nginx
+      - postgres
+
+  postgres:
+    environment:
+      - POSTGRES_ENCODING=UNICODE
+      - POSTGRES_COLLATE=en_US.UTF-8
+      - POSTGRES_COLLATE_TYPE=en_US.UTF-8
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./postgres/data:/var/lib/postgresql/data
+    container_name: postgres
+    ports:
+      - 5432:5432
+    image: postgres:13.6-alpine3.15
+    networks:
+      - home
+
+  prometheus:
+    image: prom/prometheus:v2.45.2
+    user: root
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/data:/prometheus
+    container_name: prometheus
+    restart: always
+    networks:
+      - home
+    ports:
+      - 9090:9090
+
+  nginx-prometheus-exporter:
+    image: nginx/nginx-prometheus-exporter:1.3.0
+    container_name: prometheus-nginx-exporter
+    restart: always
+    command:
+      - -nginx.scrape-uri=https://nginx/stub_status
+    expose: 
+      - 9113
+    networks:
+      - home
+    depends_on:
+      - prometheus
+
+  prometheus-node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: prometheus-node-exporter
+    restart: always
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command: 
+      - '--path.procfs=/host/proc' 
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    networks:
+      - home
+    privileged: true
+    depends_on:
+      - prometheus
+    expose:
+      - 9100
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: always
+    environment:
+      TZ: ${TZ}
+    depends_on:
+      - prometheus
+    volumes:
+      - ./grafana/data:/var/lib/grafana
+      - ./grafana/ds.yaml:/etc/grafana/provisioning/datasources/ds.yaml:ro
+    env_file:
+      - .env
+    networks:
+      - home
+    ports:
+      - 3000:3000
+    user: root
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: always
+    privileged: true
+    depends_on:
+      - prometheus
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    expose:
+      - 8080
+    networks:
+      - home
+
+  loki:
+    container_name: loki
+    image: grafana/loki:latest
+    env_file:
+      - .env
+    ports:
+      - 3100:3100
+    environment:
+      TZ: ${TZ}
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml
+      - ./loki/loki_data:/loki
+    networks:
+      - home
+    depends_on:
+      - grafana
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./nginx/log:/var/log/nginx:ro
+      - ./loki/promtail-config.yaml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml -log.level=debug
+    restart: unless-stopped
+    networks:
+      - home
+    depends_on:
+      - prometheus
+
+networks:
+    home:
+        name: home
+        external: false
